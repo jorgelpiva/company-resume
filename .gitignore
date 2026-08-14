@@ -1,6 +1,8 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.ruff_cache/
 .venv/
 venv/
 
@@ -15,3 +17,10 @@ venv/
 # Project data
 /data/
 *.sqlite3
+
+# Frontend
+node_modules/
+dist/
+
+# Vercel local state
+.vercel/
