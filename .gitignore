@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment files
+.env
+.env.*
+
+# IDE
+.vscode/
+.DS_Store
+
+# Project data
+/data/
+*.sqlite3
