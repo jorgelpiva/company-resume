@@ -204,28 +204,28 @@ Portanto, a persistência durável acontece somente depois que todo o processame
 
 ## Fluxo arquivo por arquivo
 
-| Ordem | Arquivo / função | Responsabilidade | Próxima etapa |
-|---:|---|---|---|
-| 1 | `frontend/src/App.vue::mapNewCompany()` | Controla estado da tela, exige RxDB pronto e captura a URL | `services/api.js::mapCompany()` |
-| 2 | `frontend/src/services/api.js::mapCompany()` | Serializa a requisição HTTP | `POST /api/companies/map` |
-| 3 | `backend/app/main.py::map_company()` | Valida URL pública, cria job transitório e garante cleanup | `map_company_process()` |
-| 4 | `backend/app/crawler/robots.py::read_robots_txt()` | Obtém e interpreta regras de crawling | descoberta de rotas |
-| 5 | `backend/app/crawler/sitemap.py::discover_sitemap_urls()` | Descobre sitemaps e URLs declaradas | descoberta de rotas |
-| 6 | `backend/app/crawler/route_discovery.py::discover_routes()` | Executa busca em largura em links internos | ranking de rotas |
-| 7 | `backend/app/crawler/fetcher.py::fetch_html()` | Busca HTML e renderiza SPA quando necessário | extrator |
-| 8 | `backend/app/crawler/extractor.py::extract_primary_content()` | Remove ruído e preserva blocos semânticos | score de relevância |
-| 9 | `backend/app/crawler/relevance.py::score_url_and_content()` | Pontua URL, title, H1, meta e conteúdo | seleção das páginas |
-| 10 | `backend/app/processing/summarizer.py::has_institutional_identity()` | Decide se a página já identifica a organização | pesquisa complementar, se necessária |
-| 11 | `backend/app/research/company_context.py::research_company_context()` | Identifica entidade e tipo apenas quando falta identidade local | Gemini Search ou DDGS |
-| 12 | `backend/app/processing/cleaner.py` | Normaliza texto e produz Markdown rastreável | deduplicação |
-| 13 | `backend/app/processing/deduplicator.py` | Elimina parágrafos repetidos por hash | páginas processadas |
-| 14 | `backend/app/processing/chunker.py` | Divide conteúdo e acrescenta metadados por chunk | resumo e bundle |
-| 15 | `backend/app/processing/summarizer.py::summarize_page()` | Resume chunks e depois consolida a página | perfil |
-| 16 | `backend/app/processing/profile_builder.py` | Constrói o perfil extrativo estruturado | Gemini opcional |
-| 17 | `backend/app/processing/summarizer.py::summarize_company_profile()` | Consolida narrativa grounded ou usa fallback | bundle final |
-| 18 | `backend/app/main.py` | Monta bundle, remove temporários e responde | frontend |
-| 19 | `frontend/src/db/rxdb-setup.js::companyDocument()` | Normaliza o bundle para o schema local | `incrementalUpsert()` |
-| 20 | RxDB / Dexie | Persiste em IndexedDB e emite atualizações reativas | renderização dos cards |
+| Ordem | Arquivo / função                                                      | Responsabilidade                                                | Próxima etapa                        |
+| ----: | ----------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------- |
+|     1 | `frontend/src/App.vue::mapNewCompany()`                               | Controla estado da tela, exige RxDB pronto e captura a URL      | `services/api.js::mapCompany()`     |
+|     2 | `frontend/src/services/api.js::mapCompany()`                          | Serializa a requisição HTTP                                   | `POST /api/companies/map`           |
+|     3 | `backend/app/main.py::map_company()`                                  | Valida URL pública, cria job transitório e garante cleanup    | `map_company_process()`             |
+|     4 | `backend/app/crawler/robots.py::read_robots_txt()`                    | Obtém e interpreta regras de crawling                          | descoberta de rotas                   |
+|     5 | `backend/app/crawler/sitemap.py::discover_sitemap_urls()`             | Descobre sitemaps e URLs declaradas                             | descoberta de rotas                   |
+|     6 | `backend/app/crawler/route_discovery.py::discover_routes()`           | Executa busca em largura em links internos                      | ranking de rotas                      |
+|     7 | `backend/app/crawler/fetcher.py::fetch_html()`                        | Busca HTML e renderiza SPA quando necessário                   | extrator                              |
+|     8 | `backend/app/crawler/extractor.py::extract_primary_content()`         | Remove ruído e preserva blocos semânticos                     | score de relevância                  |
+|     9 | `backend/app/crawler/relevance.py::score_url_and_content()`           | Pontua URL, title, H1, meta e conteúdo                         | seleção das páginas                |
+|    10 | `backend/app/processing/summarizer.py::has_institutional_identity()`  | Decide se a página já identifica a organização              | pesquisa complementar, se necessária |
+|    11 | `backend/app/research/company_context.py::research_company_context()` | Identifica entidade e tipo apenas quando falta identidade local | Gemini Search ou DDGS                 |
+|    12 | `backend/app/processing/cleaner.py`                                   | Normaliza texto e produz Markdown rastreável                   | deduplicação                        |
+|    13 | `backend/app/processing/deduplicator.py`                              | Elimina parágrafos repetidos por hash                          | páginas processadas                  |
+|    14 | `backend/app/processing/chunker.py`                                   | Divide conteúdo e acrescenta metadados por chunk               | resumo e bundle                       |
+|    15 | `backend/app/processing/summarizer.py::summarize_page()`              | Resume chunks e depois consolida a página                      | perfil                                |
+|    16 | `backend/app/processing/profile_builder.py`                           | Constrói o perfil extrativo estruturado                        | Gemini opcional                       |
+|    17 | `backend/app/processing/summarizer.py::summarize_company_profile()`   | Consolida narrativa grounded ou usa fallback                    | bundle final                          |
+|    18 | `backend/app/main.py`                                                 | Monta bundle, remove temporários e responde                    | frontend                              |
+|    19 | `frontend/src/db/rxdb-setup.js::companyDocument()`                    | Normaliza o bundle para o schema local                          | `incrementalUpsert()`               |
+|    20 | RxDB / Dexie                                                            | Persiste em IndexedDB e emite atualizações reativas           | renderização dos cards              |
 
 ## Pesquisa complementar e uso de ferramentas
 
@@ -380,14 +380,14 @@ A home pode ser renderizada com JavaScript durante a descoberta para revelar nav
 
 Limites atuais:
 
-| Configuração | Valor |
-|---|---:|
-| Timeout HTTP | 10 segundos |
-| Delay global entre requests | 1 segundo |
-| Redirecionamentos | até 6 tentativas |
-| Tamanho máximo por página | 5 MB |
-| Timeout do Chrome | 20 segundos |
-| Virtual time budget | 5 segundos |
+| Configuração              |             Valor |
+| --------------------------- | ----------------: |
+| Timeout HTTP                |       10 segundos |
+| Delay global entre requests |         1 segundo |
+| Redirecionamentos           | até 6 tentativas |
+| Tamanho máximo por página |              5 MB |
+| Timeout do Chrome           |       20 segundos |
+| Virtual time budget         |        5 segundos |
 
 Se o extrator encontrar menos de 200 caracteres úteis, `fetch_html()` tenta Chrome/Chromium headless. A renderização usa modo incógnito, extensões desabilitadas, limite de tempo e regras de resolução de host restritas ao domínio solicitado.
 
@@ -611,16 +611,16 @@ As fontes retornadas vêm dos chunks recuperados. Em perguntas `Quem é`, fontes
 
 O banco se chama `companyresumebrowser` e contém a coleção `companies`:
 
-| Campo | Tipo | Uso |
-|---|---|---|
-| `id` | string | slug do domínio e chave primária |
-| `name` | string | nome exibido |
-| `domain` | string | domínio de origem |
-| `sourceUrl` | string | URL usada para atualizar |
-| `mappedAt` | string | data do mapeamento |
-| `pagesProcessed` | number | métrica para o card |
-| `updatedAt` | number | índice usado na ordenação |
-| `bundle` | string | bundle completo serializado em JSON |
+| Campo              | Tipo   | Uso                                 |
+| ------------------ | ------ | ----------------------------------- |
+| `id`             | string | slug do domínio e chave primária  |
+| `name`           | string | nome exibido                        |
+| `domain`         | string | domínio de origem                  |
+| `sourceUrl`      | string | URL usada para atualizar            |
+| `mappedAt`       | string | data do mapeamento                  |
+| `pagesProcessed` | number | métrica para o card                |
+| `updatedAt`      | number | índice usado na ordenação        |
+| `bundle`         | string | bundle completo serializado em JSON |
 
 O plugin `RxDBQueryBuilderPlugin` habilita a ordenação reativa por `updatedAt`, e `RxDBUpdatePlugin` suporta operações de atualização. Dexie conecta o RxDB ao IndexedDB.
 
@@ -742,11 +742,11 @@ O histórico existe apenas em memória no componente Vue durante a tela atual e 
 
 ### Códigos relevantes
 
-| Código | Situação |
-|---:|---|
-| `200` | operação concluída |
-| `400` | URL inválida, privada ou não resolvida |
-| `410` | endpoint antigo de persistência compartilhada desativado |
+| Código | Situação                                                      |
+| ------: | --------------------------------------------------------------- |
+| `200` | operação concluída                                           |
+| `400` | URL inválida, privada ou não resolvida                        |
+| `410` | endpoint antigo de persistência compartilhada desativado       |
 | `422` | o site não produziu conteúdo útil ou houve falha no pipeline |
 
 ## Segurança
