@@ -1,5 +1,47 @@
 # Company Resume
 
+## Como subir a aplicação
+
+### Desenvolvimento: backend + frontend
+
+Terminal 1, backend:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+
+cd backend
+uvicorn app.main:app --reload --host 0.0.0.0 --port 61080
+```
+
+Terminal 2, frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Abra `http://localhost:5173`. O Vite encaminha `/api` para `http://127.0.0.1:61080`.
+
+### Rodar tudo pela porta do backend
+
+```bash
+cd frontend
+npm install
+npm run build
+
+cd ../backend
+uvicorn app.main:app --reload --host 0.0.0.0 --port 61080
+```
+
+Abra `http://localhost:61080`. Nesse modo o FastAPI serve o build do Vue em `frontend/dist`.
+
+### Containers
+
+Ainda não há `Dockerfile` nem `docker-compose*.yml` neste repositório. Quando os containers forem adicionados, o comando para subir tudo deve ficar aqui no topo, antes de qualquer explicação de arquitetura.
+
 O Company Resume transforma um domínio público em uma base de conhecimento corporativa conversacional. A aplicação descobre páginas relevantes, extrai e deduplica conteúdo, cria resumos e chunks rastreáveis, monta um perfil empresarial grounded e permite perguntas usando um pipeline RAG.
 
 O projeto foi desenhado como aplicação de portfólio sem autenticação e sem banco compartilhado. Cada visitante guarda suas próprias empresas localmente no navegador com RxDB sobre IndexedDB. O backend processa o site e responde ao chat, mas não mantém um catálogo global de consultas.
@@ -11,7 +53,7 @@ O projeto foi desenhado como aplicação de portfólio sem autenticação e sem 
 - [Visão geral](#visão-geral)
 - [Fluxo completo do mapeamento](#fluxo-completo-do-mapeamento)
 - [Fluxo arquivo por arquivo](#fluxo-arquivo-por-arquivo)
-- [Pesquisa prévia e uso de ferramentas](#pesquisa-prévia-e-uso-de-ferramentas)
+- [Pesquisa complementar e uso de ferramentas](#pesquisa-complementar-e-uso-de-ferramentas)
 - [Crawler e seleção de páginas](#crawler-e-seleção-de-páginas)
 - [Processamento e perfil corporativo](#processamento-e-perfil-corporativo)
 - [RAG e fluxo do chat](#rag-e-fluxo-do-chat)
@@ -108,12 +150,16 @@ sequenceDiagram
     App->>ApiJs: mapCompany(url)
     ApiJs->>FastAPI: POST /api/companies/map
     FastAPI->>FastAPI: normaliza, valida URL e bloqueia SSRF
-    FastAPI->>Pesquisa: research_company_context(url, domain)
-    Pesquisa-->>FastAPI: identidade, tipo, resumo, perguntas e fontes
-    FastAPI->>Crawler: robots + sitemap + seeds + descoberta BFS
+    FastAPI->>Crawler: robots + sitemap + descoberta BFS
     Crawler-->>FastAPI: rotas e route_tree
     FastAPI->>Crawler: fetch, renderização opcional, extração e score
     Crawler-->>FastAPI: páginas relevantes
+    FastAPI->>FastAPI: verifica se o RAG contém identidade institucional
+    alt identidade ausente
+        FastAPI->>Pesquisa: research_company_context(url, domain, evidências locais)
+        Pesquisa-->>FastAPI: identidade, tipo, resumo, perguntas e fontes verificadas
+        FastAPI->>Crawler: páginas institucionais oficiais descobertas na pesquisa
+    end
     FastAPI->>Processamento: limpeza e deduplicação global
     Processamento-->>FastAPI: páginas processadas
     FastAPI->>Processamento: chunking e resumo hierárquico
@@ -137,20 +183,22 @@ sequenceDiagram
 6. `backend/app/main.py::map_company()` normaliza a URL, valida sintaxe, resolve DNS e confirma que o destino é público.
 7. Um job transitório recebe um UUID apenas para progresso interno e identificação segura da pasta temporária.
 8. `map_company_process()` cria `WORK_DIR/<slug>-<job_id>` no diretório temporário do sistema.
-9. O backend faz uma pesquisa curta sobre o domínio antes do crawl.
-10. `robots.txt`, sitemaps, fontes oficiais descobertas na pesquisa e links internos alimentam a descoberta de rotas.
-11. As rotas são buscadas, extraídas e pontuadas por relevância.
-12. O conteúdo selecionado é limpo e deduplicado entre todas as páginas.
-13. Durante o processamento, artefatos intermediários são escritos na pasta temporária: páginas Markdown, chunks, resumos, contexto de pesquisa, árvore de rotas, perfil e metadados.
-14. Cada página é dividida em chunks de até 1.500 caracteres e resumida hierarquicamente.
-15. Um perfil corporativo extrativo é criado; quando há chave Gemini, o modelo tenta consolidá-lo em uma narrativa grounded.
-16. O backend monta um `bundle` em memória com `metadata`, `company_profile`, `chunks`, `research_context`, `page_summaries` e `route_tree`.
-17. A pasta temporária é removida antes da resposta. Um bloco `finally` também faz limpeza defensiva em falhas ou cancelamentos normais da requisição.
-18. O job interno é removido da memória.
-19. O bundle volta ao navegador.
-20. `companyDocument()` transforma o bundle em um documento RxDB.
-21. `incrementalUpsert()` insere a empresa ou substitui o mapeamento anterior com o mesmo slug.
-22. A consulta reativa RxDB atualiza automaticamente os cards da interface.
+9. `robots.txt`, sitemaps e links internos alimentam a descoberta inicial de rotas.
+10. As rotas são buscadas, extraídas e pontuadas por relevância; título, H1 e meta description também são preservados em páginas escassas.
+11. O backend verifica se o conteúdo local contém identidade institucional explícita.
+12. Somente quando essa identidade falta, uma pesquisa curta e neutra pelo domínio complementa a análise. A ausência de informação nunca define o tipo do site.
+13. Páginas institucionais oficiais descobertas nessa pesquisa podem ser adicionadas ao crawl; páginas de produtos ou subprodutos não viram seeds de identidade.
+14. O conteúdo selecionado é limpo e deduplicado entre todas as páginas.
+15. Durante o processamento, artefatos intermediários são escritos na pasta temporária: páginas Markdown, chunks, resumos, contexto de pesquisa, árvore de rotas, perfil e metadados.
+16. Cada página é dividida em chunks de até 1.500 caracteres e resumida hierarquicamente.
+17. Um perfil corporativo extrativo é criado; quando há chave Gemini, o modelo tenta consolidá-lo em uma narrativa grounded.
+18. O backend monta um `bundle` em memória com `metadata`, `company_profile`, `chunks`, `research_context`, `page_summaries` e `route_tree`.
+19. A pasta temporária é removida antes da resposta. Um bloco `finally` também faz limpeza defensiva em falhas ou cancelamentos normais da requisição.
+20. O job interno é removido da memória.
+21. O bundle volta ao navegador.
+22. `companyDocument()` transforma o bundle em um documento RxDB.
+23. `incrementalUpsert()` insere a empresa ou substitui o mapeamento anterior com o mesmo slug.
+24. A consulta reativa RxDB atualiza automaticamente os cards da interface.
 
 Portanto, a persistência durável acontece somente depois que todo o processamento terminou e somente no navegador que iniciou a operação.
 
@@ -161,26 +209,27 @@ Portanto, a persistência durável acontece somente depois que todo o processame
 | 1 | `frontend/src/App.vue::mapNewCompany()` | Controla estado da tela, exige RxDB pronto e captura a URL | `services/api.js::mapCompany()` |
 | 2 | `frontend/src/services/api.js::mapCompany()` | Serializa a requisição HTTP | `POST /api/companies/map` |
 | 3 | `backend/app/main.py::map_company()` | Valida URL pública, cria job transitório e garante cleanup | `map_company_process()` |
-| 4 | `backend/app/research/company_context.py::research_company_context()` | Identifica entidade e tipo do site antes do crawl | Gemini Search ou DDGS |
-| 5 | `backend/app/crawler/robots.py::read_robots_txt()` | Obtém e interpreta regras de crawling | descoberta de rotas |
-| 6 | `backend/app/crawler/sitemap.py::discover_sitemap_urls()` | Descobre sitemaps e URLs declaradas | descoberta de rotas |
-| 7 | `backend/app/crawler/route_discovery.py::discover_routes()` | Executa busca em largura em links internos | ranking de rotas |
-| 8 | `backend/app/crawler/fetcher.py::fetch_html()` | Busca HTML e renderiza SPA quando necessário | extrator |
-| 9 | `backend/app/crawler/extractor.py::extract_primary_content()` | Remove ruído e preserva blocos semânticos | score de relevância |
-| 10 | `backend/app/crawler/relevance.py::score_url_and_content()` | Pontua URL, title, H1, meta e conteúdo | seleção das páginas |
-| 11 | `backend/app/processing/cleaner.py` | Normaliza texto e produz Markdown rastreável | deduplicação |
-| 12 | `backend/app/processing/deduplicator.py` | Elimina parágrafos repetidos por hash | páginas processadas |
-| 13 | `backend/app/processing/chunker.py` | Divide conteúdo e acrescenta metadados por chunk | resumo e bundle |
-| 14 | `backend/app/processing/summarizer.py::summarize_page()` | Resume chunks e depois consolida a página | perfil |
-| 15 | `backend/app/processing/profile_builder.py` | Constrói o perfil extrativo estruturado | Gemini opcional |
-| 16 | `backend/app/processing/summarizer.py::summarize_company_profile()` | Consolida narrativa grounded ou usa fallback | bundle final |
-| 17 | `backend/app/main.py` | Monta bundle, remove temporários e responde | frontend |
-| 18 | `frontend/src/db/rxdb-setup.js::companyDocument()` | Normaliza o bundle para o schema local | `incrementalUpsert()` |
-| 19 | RxDB / Dexie | Persiste em IndexedDB e emite atualizações reativas | renderização dos cards |
+| 4 | `backend/app/crawler/robots.py::read_robots_txt()` | Obtém e interpreta regras de crawling | descoberta de rotas |
+| 5 | `backend/app/crawler/sitemap.py::discover_sitemap_urls()` | Descobre sitemaps e URLs declaradas | descoberta de rotas |
+| 6 | `backend/app/crawler/route_discovery.py::discover_routes()` | Executa busca em largura em links internos | ranking de rotas |
+| 7 | `backend/app/crawler/fetcher.py::fetch_html()` | Busca HTML e renderiza SPA quando necessário | extrator |
+| 8 | `backend/app/crawler/extractor.py::extract_primary_content()` | Remove ruído e preserva blocos semânticos | score de relevância |
+| 9 | `backend/app/crawler/relevance.py::score_url_and_content()` | Pontua URL, title, H1, meta e conteúdo | seleção das páginas |
+| 10 | `backend/app/processing/summarizer.py::has_institutional_identity()` | Decide se a página já identifica a organização | pesquisa complementar, se necessária |
+| 11 | `backend/app/research/company_context.py::research_company_context()` | Identifica entidade e tipo apenas quando falta identidade local | Gemini Search ou DDGS |
+| 12 | `backend/app/processing/cleaner.py` | Normaliza texto e produz Markdown rastreável | deduplicação |
+| 13 | `backend/app/processing/deduplicator.py` | Elimina parágrafos repetidos por hash | páginas processadas |
+| 14 | `backend/app/processing/chunker.py` | Divide conteúdo e acrescenta metadados por chunk | resumo e bundle |
+| 15 | `backend/app/processing/summarizer.py::summarize_page()` | Resume chunks e depois consolida a página | perfil |
+| 16 | `backend/app/processing/profile_builder.py` | Constrói o perfil extrativo estruturado | Gemini opcional |
+| 17 | `backend/app/processing/summarizer.py::summarize_company_profile()` | Consolida narrativa grounded ou usa fallback | bundle final |
+| 18 | `backend/app/main.py` | Monta bundle, remove temporários e responde | frontend |
+| 19 | `frontend/src/db/rxdb-setup.js::companyDocument()` | Normaliza o bundle para o schema local | `incrementalUpsert()` |
+| 20 | RxDB / Dexie | Persiste em IndexedDB e emite atualizações reativas | renderização dos cards |
 
-## Pesquisa prévia e uso de ferramentas
+## Pesquisa complementar e uso de ferramentas
 
-Sites como portais de notícias e marketplaces frequentemente não apresentam sua identidade na home. Para evitar depender exclusivamente de `/sobre`, o sistema executa uma pesquisa curta antes do crawling.
+Sites como portais de notícias e marketplaces frequentemente não apresentam sua identidade na home. O sistema primeiro extrai o conteúdo do próprio site e só executa uma pesquisa curta quando não encontra identidade institucional suficiente. A consulta usa o domínio exato e termos neutros; ela não inclui rótulos como `marketplace`, evitando induzir a classificação.
 
 ### Gemini com Google Search grounding
 
@@ -254,7 +303,9 @@ Quando não há chave Gemini, a cota falha ou a resposta grounded é inválida, 
 
 Os resultados são pontuados. Fontes do domínio em páginas institucionais recebem maior prioridade, seguidas por Wikipedia, páginas do próprio domínio e títulos compatíveis com a marca.
 
-O fallback também classifica heurísticamente o site como empresa, portal, marketplace, e-commerce, instituição educacional ou governo e gera perguntas adequadas ao tipo.
+O fallback classifica cada resultado separadamente e pondera evidências alinhadas à entidade raiz. Uma ocorrência isolada em um subproduto não classifica todo o domínio: por exemplo, uma página de Cloud Marketplace não transforma um mecanismo de busca em marketplace. Esse rótulo exige evidência explícita de intermediação entre compradores e vendedores. Catálogo ou conteúdo escasso, por si só, não é evidência.
+
+Consultas neutras de finalidade e identidade são tentadas em provedores isolados, dentro de um orçamento total de 30 segundos. Resultados genéricos de baixa confiança não encerram a pesquisa, e uma página como “Google Sites” não pode representar `google.com` apenas por compartilhar a marca. O tipo `mecanismo_de_busca` possui perguntas próprias e é reconhecido por descrições explícitas da função de pesquisar e encontrar informações.
 
 ### Prioridade do RAG sobre a pesquisa externa
 
@@ -266,9 +317,21 @@ A pesquisa externa não substitui o conteúdo rastreado.
 - títulos institucionais;
 - frases de identidade presentes na home.
 
-Se a identidade existe no RAG, ela tem prioridade total. Se não existe, o contexto externo pode preencher apenas `Resumo executivo` e `Quem é`, mantendo linhas `Fonte externa: URL`.
+Se a identidade existe no RAG, ela tem prioridade total e a pesquisa externa nem é executada. Se não existe, o contexto externo só pode preencher `Resumo executivo` e `Quem é` quando contém entidade, confiança alta ou média e ao menos uma fonte HTTP(S), mantendo linhas `Fonte externa: URL`.
 
-Até oito fontes da pesquisa que pertencem ao mesmo domínio podem virar seeds adicionais do crawler. Fontes externas, como Wikipedia, ajudam na identidade, mas não são rastreadas como se fossem páginas da empresa.
+Somente páginas de identidade do mesmo domínio, como `/sobre`, `/about`, `/institucional` e `/quem-somos`, podem virar seeds adicionais do crawler. Páginas de catálogo, marketplace de um subproduto e fontes externas, como Wikipedia, podem ajudar na pesquisa, mas não são rastreadas como páginas institucionais da entidade.
+
+### Avaliação de suficiência do conteúdo
+
+O bundle inclui `metadata.content_assessment`, que separa volume textual de identidade institucional. Os estados são `escasso`, `sem_identidade_institucional` e `suficiente`; a avaliação também registra se a página inicial é escassa. Quando necessário, o perfil explica:
+
+- que a página inicial ou o site forneceu pouco texto útil;
+- quais títulos e rotas foram realmente observados;
+- se subpáginas trouxeram apenas conteúdo de produtos ou serviços;
+- se a identidade veio de pesquisa pública verificável;
+- ou se nem a pesquisa complementar encontrou evidência suficiente.
+
+Rotas de subprodutos, como `/docs/about`, continuam disponíveis como conteúdo do RAG, mas não são tratadas como página institucional da entidade raiz.
 
 ## Crawler e seleção de páginas
 
@@ -911,6 +974,8 @@ A suíte cobre, entre outros pontos:
 - roteamento e fallback Gemini;
 - preservação das fontes de grounding;
 - classificação de portais e marketplaces;
+- regressões para Google Search, Google Sites e Cloud Marketplace;
+- avaliação e narrativa de páginas iniciais escassas;
 - uso condicionado da identidade externa;
 - seeds oficiais do mesmo domínio;
 - canonicalização;

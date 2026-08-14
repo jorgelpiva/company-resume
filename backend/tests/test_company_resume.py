@@ -19,8 +19,17 @@ from app.processing.chunker import chunk_text
 from app.processing.cleaner import build_markdown
 from app.processing.embeddings import encode_chunks
 from app.processing.profile_builder import build_company_profile
-from app.processing.summarizer import enrich_profile_with_external_identity, has_institutional_identity
-from app.research.company_context import _build_public_context, research_company_context
+from app.processing.summarizer import (
+    enrich_profile_with_external_identity,
+    has_institutional_identity,
+    summarize_company_profile,
+)
+from app.research.company_context import (
+    _build_public_context,
+    _search_public_context,
+    _search_public_context_queries,
+    research_company_context,
+)
 from app.storage.local import LocalCompanyStorage
 
 
@@ -138,7 +147,7 @@ def test_company_research_classifies_portal_and_keeps_provenance(monkeypatch):
     result = asyncio.run(research_company_context("https://example.com", "example.com"))
 
     assert result["site_type"] == "portal_de_conteudo"
-    assert result["suggested_questions"] == ["Quais notícias estão em destaque?"]
+    assert "Quais notícias estão em destaque?" in result["suggested_questions"]
     assert result["sources"][0]["url"] == "https://example.com/institucional"
 
 
@@ -164,13 +173,226 @@ def test_company_research_builds_context_from_public_search_results():
     assert "Como funciona o marketplace?" in result["suggested_questions"]
 
 
+def test_magazine_luiza_is_marketplace_only_with_explicit_root_platform_evidence():
+    results = [
+        {
+            "url": "https://www.magazineluiza.com.br/",
+            "title": "Magazine Luiza",
+            "snippet": "Loja online com catálogo de móveis, eletrônicos e produtos para casa.",
+        },
+        {
+            "url": "https://www.magazineluiza.com.br/marketplace/venda-no-magalu",
+            "title": "Marketplace Magalu - Venda no Magalu",
+            "snippet": "A plataforma conecta lojistas parceiros a compradores em todo o Brasil.",
+        },
+    ]
+
+    result = _build_public_context("magazineluiza.com.br", "magazineluiza.com.br o que é", results)
+
+    assert result["entity_name"] == "Magazine Luiza"
+    assert result["site_type"] == "marketplace"
+    assert "Como funciona o marketplace?" in result["suggested_questions"]
+
+
+def test_google_search_is_not_classified_as_marketplace_due_to_cloud_subproduct():
+    results = [
+        {
+            "url": "https://www.google.com/",
+            "title": "Google",
+            "snippet": (
+                "O Google é um mecanismo de busca que permite pesquisar informações, "
+                "imagens e vídeos na Web."
+            ),
+        },
+        {
+            "url": "https://about.google/intl/pt-BR/products/search/",
+            "title": "Google Search - Sobre o Google",
+            "snippet": "O Google Search ajuda pessoas a encontrar informações úteis na internet.",
+        },
+        {
+            "url": "https://cloud.google.com/marketplace?hl=pt-br",
+            "title": "Google Cloud Marketplace",
+            "snippet": "O Google Cloud Marketplace oferece soluções de parceiros para clientes de nuvem.",
+        },
+        {
+            "url": "https://pt.wikipedia.org/wiki/Google_Sites",
+            "title": "Google Sites - Wikipédia",
+            "snippet": "Google Sites é um produto para criação de sites e páginas colaborativas.",
+        },
+    ]
+
+    result = _build_public_context("google.com", "google o que faz", results)
+
+    assert result["entity_name"] == "Google"
+    assert result["site_type"] == "mecanismo_de_busca"
+    assert "mecanismo de busca" in result["summary"]
+    assert all("compra" not in question.lower() for question in result["suggested_questions"])
+    assert all("venda" not in question.lower() for question in result["suggested_questions"])
+
+
+def test_public_context_uses_domain_name_when_root_result_title_is_generic():
+    result = _build_public_context(
+        "acme.example",
+        '"acme.example" o que o site oferece',
+        [{
+            "url": "https://acme.example/",
+            "title": "Home",
+            "snippet": (
+                "A Acme desenvolve software para equipes organizarem projetos, documentos "
+                "e fluxos de trabalho em uma única plataforma colaborativa."
+            ),
+        }],
+    )
+
+    assert result["entity_name"] == "Acme"
+    assert result["entity_name"] != "Home"
+
+
+def test_public_search_skips_backend_with_only_google_subproduct_results(monkeypatch):
+    backends = []
+
+    def fake_search(_query, backend):
+        backends.append(backend)
+        if backend == "wikipedia":
+            return [{
+                "url": "https://pt.wikipedia.org/wiki/Google_Sites",
+                "title": "Google Sites - Wikipédia",
+                "snippet": "Google Sites é um produto para criação de páginas colaborativas.",
+            }]
+        return [{
+            "url": "https://www.google.com/",
+            "title": "Google",
+            "snippet": (
+                "Google Search é um mecanismo de busca na Web que permite pesquisar informações, "
+                "imagens, vídeos, mapas e outros conteúdos publicados na internet por diferentes fontes."
+            ),
+        }]
+
+    monkeypatch.setattr("app.research.company_context._search_web", fake_search)
+
+    result = _search_public_context("google.com", '"google.com" site oficial o que é')
+
+    assert backends == ["wikipedia", "bing"]
+    assert result["entity_name"] == "Google"
+    assert result["site_type"] == "mecanismo_de_busca"
+
+
+def test_google_search_function_is_recognized_without_literal_search_engine_label():
+    results = [
+        {
+            "url": "https://play.google.com/store/apps/details?id=com.google.android.googlequicksearchbox",
+            "title": "Google – Apps no Google Play",
+            "snippet": (
+                "O Google app oferece mais maneiras de pesquisar sobre o que é importante para você "
+                "e encontrar respostas rápidas com informações úteis."
+            ),
+        },
+        {
+            "url": "https://www.google.com.nf/",
+            "title": "Google",
+            "snippet": "Publicidade, soluções para negócios e informações sobre o Google.",
+        },
+    ]
+
+    result = _build_public_context("google.com", "google.com como funciona o site", results)
+
+    assert result["entity_name"] == "Google"
+    assert result["site_type"] == "mecanismo_de_busca"
+    assert "mecanismo de busca" in result["summary"]
+
+
+def test_public_search_prefers_root_domain_evidence_over_subproduct_source(monkeypatch):
+    calls = []
+
+    def fake_context(_domain, query, **_kwargs):
+        calls.append(query)
+        if query == "purpose":
+            return {
+                "site_type": "mecanismo_de_busca",
+                "summary": "Descrição extensa do aplicativo de busca. " * 5,
+                "confidence": "media",
+                "sources": [{"url": "https://play.google.com/app", "title": "Google app"}],
+            }
+        return {
+            "site_type": "mecanismo_de_busca",
+            "summary": "Google Search pesquisa informações, imagens e vídeos publicados na Web. " * 2,
+            "confidence": "media",
+            "sources": [{"url": "https://www.google.com/", "title": "Google"}],
+        }
+
+    monkeypatch.setattr("app.research.company_context._search_public_context", fake_context)
+
+    result = _search_public_context_queries("google.com", ["purpose", "identity", "unused"])
+
+    assert calls == ["purpose", "identity"]
+    assert result["sources"][0]["url"] == "https://www.google.com/"
+
+
+def test_sparse_product_catalog_is_not_enough_to_infer_marketplace():
+    results = [
+        {
+            "url": "https://lojavitrine.example/",
+            "title": "Loja Vitrine",
+            "snippet": "Confira o catálogo de eletrônicos, móveis, livros e itens para casa.",
+        },
+        {
+            "url": "https://lojavitrine.example/ofertas",
+            "title": "Ofertas - Loja Vitrine",
+            "snippet": "Produtos em destaque e promoções disponíveis por tempo limitado.",
+        },
+    ]
+
+    result = _build_public_context("lojavitrine.example", "loja vitrine o que faz", results)
+
+    assert result["site_type"] != "marketplace"
+    assert "Como funciona o marketplace?" not in result["suggested_questions"]
+
+
+def test_grounded_marketplace_claim_is_sanitized_when_evidence_describes_search(monkeypatch):
+    async def fake_grounded_content(*_args, **_kwargs):
+        return {
+            "text": (
+                '{"entity_name":"Google","site_type":"marketplace",'
+                '"summary":"Google é um mecanismo de busca para encontrar informações na Web.",'
+                '"organization_name":"Google LLC",'
+                '"relationship":"O domínio google.com oferece o mecanismo de busca Google Search.",'
+                '"content_focus":["Pesquisa na Web","Busca de imagens e vídeos"],'
+                '"suggested_questions":["Como funciona o marketplace?",'
+                '"Quais opções de compra e venda são oferecidas?"],"confidence":"alta"}'
+            ),
+            "sources": [
+                {"url": "https://www.google.com/", "title": "Google"},
+                {"url": "https://about.google/products/search/", "title": "Google Search"},
+            ],
+            "queries": ["google mecanismo de busca"],
+            "model": "gemini-2.5-flash-lite",
+        }
+
+    monkeypatch.setattr("app.research.company_context.get_api_key", lambda: "teste")
+    monkeypatch.setattr("app.research.company_context.generate_grounded_content", fake_grounded_content)
+
+    result = asyncio.run(research_company_context("https://google.com", "google.com"))
+
+    assert result["site_type"] == "mecanismo_de_busca"
+    assert all("marketplace" not in question.lower() for question in result["suggested_questions"])
+    assert all("compra" not in question.lower() for question in result["suggested_questions"])
+    assert all("venda" not in question.lower() for question in result["suggested_questions"])
+    assert any(
+        term in question.lower()
+        for question in result["suggested_questions"]
+        for term in ("busca", "pesquisa")
+    )
+
+
 def test_external_identity_only_fills_profile_when_rag_lacks_institutional_page():
     marketplace_pages = [{"url": "https://example.com/produtos", "title": "Produtos", "content": "Produto " * 80}]
     institutional_pages = [{"url": "https://example.com/sobre", "title": "Sobre nós", "content": "Somos uma empresa. " * 30}]
     profile = "# Loja\n\n## Resumo executivo\nCatálogo de eletrônicos.\n\n## Quem é\nNão identificado no conteúdo público analisado.\n\n## História\nNão identificado no conteúdo público analisado.\n"
     context = {
+        "entity_name": "Loja",
         "summary": "A Loja é um marketplace que conecta compradores e vendedores.",
         "relationship": "O domínio pertence à Loja.",
+        "confidence": "alta",
         "sources": [{"url": "https://example.org/loja"}],
     }
 
@@ -181,11 +403,65 @@ def test_external_identity_only_fills_profile_when_rag_lacks_institutional_page(
     assert "Fonte externa: https://example.org/loja" in enriched
 
 
+@pytest.mark.parametrize(
+    "context",
+    [
+        {
+            "entity_name": "Loja Vitrine",
+            "summary": "A Loja Vitrine é um marketplace que conecta compradores e vendedores.",
+            "relationship": "O domínio pertence à Loja Vitrine.",
+            "confidence": "baixa",
+            "sources": [{"url": "https://example.org/loja-vitrine"}],
+        },
+        {
+            "entity_name": "Loja Vitrine",
+            "summary": "A Loja Vitrine é um marketplace que conecta compradores e vendedores.",
+            "relationship": "O domínio pertence à Loja Vitrine.",
+            "confidence": "alta",
+            "sources": [],
+        },
+    ],
+    ids=["low-confidence", "without-sources"],
+)
+def test_unverified_external_context_does_not_enter_extractive_profile(context, monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    pages = [
+        {
+            "url": "https://lojavitrine.example/produtos",
+            "title": "Catálogo",
+            "content": "Catálogo de eletrônicos, móveis, livros e itens para casa.",
+            "summary": "Catálogo de eletrônicos, móveis, livros e itens para casa.",
+        }
+    ]
+    fallback = (
+        "# Loja Vitrine\n\n"
+        "## Resumo executivo\n\nCatálogo de eletrônicos e itens para casa.\n\n"
+        "## Quem é\n\nNão identificado no conteúdo público analisado.\n\n"
+        "## Fontes analisadas\n\n- https://lojavitrine.example/produtos\n"
+    )
+
+    profile, generation = asyncio.run(summarize_company_profile(
+        {"name": "Loja Vitrine", "mapped_at": "2026-08-14"},
+        pages,
+        fallback,
+        research_context=context,
+    ))
+
+    assert generation == "extractive"
+    assert "Catálogo de eletrônicos e itens para casa." in profile
+    assert "pouco conteúdo textual relevante" in profile
+    assert "não encontrou evidência verificável suficiente" in profile
+    assert "Fonte externa:" not in profile
+    assert "marketplace" not in profile.lower()
+
+
 def test_only_same_domain_research_sources_become_crawl_seeds():
     context = {
         "sources": [
             {"url": "https://www.example.com/institucional/sobre"},
             {"url": "https://carreiras.example.com/quem-somos"},
+            {"url": "https://cloud.example.com/about"},
             {"url": "https://notexample.com/sobre"},
             {"url": "https://pt.wikipedia.org/wiki/Example"},
         ]

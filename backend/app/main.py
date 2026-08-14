@@ -19,9 +19,9 @@ from app.config import DATA_DIR, MAX_PAGES, MIN_PRIMARY_CONTENT_CHARS, WORK_DIR
 from app.chat.service import answer_question_from_context
 from app.crawler.fetcher import fetch_html
 from app.crawler.relevance import score_url_and_content
-from app.crawler.route_discovery import discover_routes
+from app.crawler.route_discovery import build_route_tree, discover_routes
 from app.crawler.sitemap import discover_sitemap_urls
-from app.crawler.robots import read_robots_txt
+from app.crawler.robots import is_allowed_by_robots, read_robots_txt
 from app.crawler.security import ensure_public_url, validate_url_syntax
 from app.crawler.url_normalizer import normalize_url
 from app.jobs.mapper import create_job, remove_job, update_job
@@ -31,7 +31,15 @@ from app.processing.cleaner import build_markdown, clean_text
 from app.processing.deduplicator import deduplicate_paragraphs, normalize_for_hash
 from app.crawler.extractor import extract_primary_content
 from app.processing.profile_builder import build_company_profile
-from app.processing.summarizer import has_institutional_identity, summarize_company_profile, summarize_page
+from app.processing.summarizer import (
+    assess_site_content,
+    has_institutional_identity,
+    is_institutional_identity_host,
+    is_institutional_identity_path,
+    is_usable_external_identity_context,
+    summarize_company_profile,
+    summarize_page,
+)
 from app.research.company_context import research_company_context
 
 app = FastAPI(title="Company Resume")
@@ -86,12 +94,45 @@ def get_research_seed_urls(research_context: dict[str, Any] | None, domain: str)
     seeds: list[str] = []
     for source in (research_context or {}).get("sources", []):
         source_url = source.get("url", "") if isinstance(source, dict) else ""
-        source_host = (urlparse(source_url).hostname or "").removeprefix("www.").lower()
-        if source_url.startswith(("http://", "https://")) and (
-            source_host == domain or source_host.endswith(f".{domain}")
+        parsed_source = urlparse(source_url)
+        source_host = (parsed_source.hostname or "").removeprefix("www.").lower()
+        source_path = parsed_source.path.lower().rstrip("/") or "/"
+        if (
+            source_url.startswith(("http://", "https://"))
+            and is_institutional_identity_host(source_host, domain)
+            and is_institutional_identity_path(source_path)
         ):
             seeds.append(source_url)
     return list(dict.fromkeys(seeds))[:8]
+
+
+async def extract_page_entry(
+    route: str,
+    validated_url: str,
+    html_cache: dict[str, str],
+) -> dict[str, Any] | None:
+    html = html_cache.get(route)
+    if html is None:
+        html = await fetch_html(route)
+        html_cache[route] = html
+    extracted = extract_primary_content(html, route)
+    title = extracted["title"] or "Página"
+    h1 = extracted["h1"] or ""
+    meta = extracted["meta_description"] or ""
+    content = extracted["content"].strip()
+    score = score_url_and_content(route, title, h1, meta, content)
+    if len(content) < MIN_PRIMARY_CONTENT_CHARS and route != validated_url:
+        return None
+    if score <= 0 and route != validated_url:
+        return None
+    return {
+        "url": route,
+        "title": title,
+        "h1": h1,
+        "meta_description": meta,
+        "score": score,
+        "content": content,
+    }
 
 
 async def map_company_process(url: str, job_id: str) -> Dict[str, Any]:
@@ -119,33 +160,22 @@ async def map_company_process(url: str, job_id: str) -> Dict[str, Any]:
         "chunks": 0,
     }
 
-    update_job(job_id, progress=8, message="Identificando organização e tipo do site")
-    research_context = await research_company_context(validated_url, domain)
-    if research_context:
-        (work_dir / "research_context.json").write_text(
-            json.dumps(research_context, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        metadata["site_type"] = research_context.get("site_type")
-        metadata["research_confidence"] = research_context.get("confidence")
-        metadata["suggested_questions"] = research_context.get("suggested_questions", [])
-    else:
-        metadata["site_type"] = None
-        metadata["research_confidence"] = None
-        metadata["suggested_questions"] = []
+    research_context: dict[str, Any] | None = None
+    metadata["site_type"] = None
+    metadata["research_confidence"] = None
+    metadata["suggested_questions"] = []
+    metadata["research_seed_urls"] = 0
 
-    update_job(job_id, progress=12, message="Analisando robots.txt e sitemap")
+    update_job(job_id, progress=8, message="Analisando robots.txt e sitemap")
     robots = await read_robots_txt(validated_url)
     sitemap_urls = await discover_sitemap_urls(validated_url)
-    research_seed_urls = get_research_seed_urls(research_context, domain)
-    metadata["research_seed_urls"] = len(research_seed_urls)
 
-    update_job(job_id, progress=25, message="Descobrindo rotas")
+    update_job(job_id, progress=15, message="Descobrindo rotas")
     html_cache: dict[str, str] = {}
     discovered_routes, route_tree = await discover_routes(
         validated_url,
         domain,
-        seed_urls=[*sitemap_urls, *research_seed_urls],
+        seed_urls=sitemap_urls,
         robots_rules=robots.get("rules", []),
         html_cache=html_cache,
     )
@@ -166,47 +196,123 @@ async def map_company_process(url: str, job_id: str) -> Dict[str, Any]:
         try:
             update_job(
                 job_id,
-                progress=25 + int((idx / max(len(ranked_routes), 1)) * 20),
+                progress=20 + int((idx / max(len(ranked_routes), 1)) * 25),
                 message=f"Analisando relevância ({idx}/{len(ranked_routes)})",
             )
-            html = html_cache.get(route)
-            if html is None:
-                html = await fetch_html(route)
-                html_cache[route] = html
-            extracted = extract_primary_content(html, route)
-            title = extracted["title"] or "Página"
-            h1 = extracted["h1"] or ""
-            meta = extracted["meta_description"] or ""
-            content = extracted["content"].strip()
-            score = score_url_and_content(route, title, h1, meta, content)
-            if len(content) < MIN_PRIMARY_CONTENT_CHARS and route != validated_url:
-                continue
-            if score <= 0 and route != validated_url:
-                continue
-            page_entries.append({
-                "url": route,
-                "title": title,
-                "h1": h1,
-                "meta_description": meta,
-                "score": score,
-                "content": content,
-            })
+            entry = await extract_page_entry(route, validated_url, html_cache)
+            if entry:
+                page_entries.append(entry)
         except Exception:
             continue
 
-    page_entries = sorted(page_entries, key=lambda item: item["score"], reverse=True)[:MAX_PAGES]
+    local_identity_pages = [
+        {
+            "url": item["url"],
+            "title": item["title"],
+            "content": "\n\n".join(
+                part for part in (
+                    item.get("meta_description", ""),
+                    item.get("h1", ""),
+                    item.get("content", ""),
+                )
+                if part
+            ),
+        }
+        for item in page_entries
+    ]
+    if not has_institutional_identity(local_identity_pages, root_domain=domain):
+        update_job(job_id, progress=48, message="Complementando a identidade com pesquisa pública")
+        research_context = await research_company_context(
+            validated_url,
+            domain,
+            page_evidence=page_entries,
+        )
+        if research_context:
+            (work_dir / "research_context.json").write_text(
+                json.dumps(research_context, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            metadata["research_confidence"] = research_context.get("confidence")
+            if is_usable_external_identity_context(research_context):
+                metadata["site_type"] = research_context.get("site_type")
+                metadata["suggested_questions"] = research_context.get("suggested_questions", [])
+
+            # A confiança limita o que entra na narrativa, não a verificação de
+            # uma página institucional oficial do próprio domínio.
+            research_seed_urls = get_research_seed_urls(research_context, domain)
+            metadata["research_seed_urls"] = len(research_seed_urls)
+            if research_seed_urls:
+                known_routes = {item["url"] for item in page_entries}
+                validated_origin = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+                robots_by_origin = {validated_origin: robots.get("rules", [])}
+                seed_candidates: list[str] = []
+                for route in sorted(
+                    research_seed_urls,
+                    key=score_url_and_content,
+                    reverse=True,
+                ):
+                    if route in known_routes:
+                        continue
+                    parsed_seed = urlparse(route)
+                    seed_origin = f"{parsed_seed.scheme.lower()}://{parsed_seed.netloc.lower()}"
+                    if seed_origin not in robots_by_origin:
+                        seed_robots = await read_robots_txt(f"{seed_origin}/")
+                        robots_by_origin[seed_origin] = seed_robots.get("rules", [])
+                    if is_allowed_by_robots(route, robots_by_origin[seed_origin]):
+                        seed_candidates.append(route)
+                    if len(seed_candidates) >= 8:
+                        break
+                for route in seed_candidates:
+                    try:
+                        entry = await extract_page_entry(route, validated_url, html_cache)
+                    except Exception:
+                        continue
+                    if entry:
+                        entry["research_identity_seed"] = True
+                        page_entries.append(entry)
+                        known_routes.add(route)
+                discovered_routes = list(dict.fromkeys([*discovered_routes, *seed_candidates]))
+                route_tree = build_route_tree(discovered_routes, validated_url)
+
+    page_entries = sorted(
+        page_entries,
+        key=lambda item: (
+            item["url"] == validated_url,
+            bool(item.get("research_identity_seed")),
+            item["score"],
+        ),
+        reverse=True,
+    )[:MAX_PAGES]
     metadata["pages_discovered"] = len(discovered_routes)
     metadata["pages_selected"] = len(page_entries)
     metadata["robots_txt"] = robots.get("source")
     metadata["sitemap_urls_found"] = len(sitemap_urls)
 
-    update_job(job_id, progress=45, message="Extraindo conteúdo")
+    update_job(job_id, progress=52, message="Extraindo conteúdo")
     seen_paragraphs: set[str] = set()
     pages_path = work_dir / "pages"
     pages_path.mkdir(parents=True, exist_ok=True)
     for item in page_entries:
+        raw_page_content = "\n\n".join(dict.fromkeys(
+            part for part in (
+                item.get("meta_description", ""),
+                item.get("h1", ""),
+                item.get("content", ""),
+            )
+            if part and part not in item.get("content", "")
+        ))
+        if item.get("content"):
+            raw_page_content = "\n\n".join(
+                part for part in (raw_page_content, item["content"]) if part
+            )
+        if not raw_page_content and item.get("title") not in {None, "", "Página"}:
+            raw_page_content = f"Título da página: {item['title']}."
+        if not raw_page_content and item["url"] == validated_url:
+            raw_page_content = (
+                "Nenhum conteúdo textual relevante pôde ser extraído da página inicial."
+            )
         paragraphs = []
-        for paragraph in deduplicate_paragraphs([clean_text(item["content"])]):
+        for paragraph in deduplicate_paragraphs([clean_text(raw_page_content)]):
             normalized = normalize_for_hash(paragraph)
             if normalized in seen_paragraphs:
                 continue
@@ -225,12 +331,9 @@ async def map_company_process(url: str, job_id: str) -> Dict[str, Any]:
     if not processed_pages:
         raise ValueError("Nenhuma página com conteúdo institucional útil pôde ser processada")
 
-    rag_has_identity = has_institutional_identity(processed_pages)
-    researched_name_available = bool(
-        research_context
-        and research_context.get("entity_name")
-        and research_context.get("confidence") in {"alta", "media"}
-    )
+    metadata["content_assessment"] = assess_site_content(processed_pages, root_domain=domain)
+    rag_has_identity = has_institutional_identity(processed_pages, root_domain=domain)
+    researched_name_available = is_usable_external_identity_context(research_context)
     metadata["identity_source"] = "rag" if rag_has_identity else ("external_research" if researched_name_available else "inferred")
     if not rag_has_identity and researched_name_available:
         metadata["name"] = research_context["entity_name"]

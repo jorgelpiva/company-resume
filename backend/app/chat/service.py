@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from app.config import DATA_DIR, TOP_K
 from app.chat.retrieval import retrieve_top_chunks_from_data
 from app.gemini_client import generate_content, get_api_key
+from app.processing.summarizer import is_usable_external_identity_context
 
 load_dotenv()
 
@@ -58,6 +59,7 @@ def _profile_section(profile_text: str, heading: str) -> tuple[str, list[str]]:
 def _intent_section(question: str) -> str | None:
     normalized = unicodedata.normalize("NFKD", question).encode("ascii", "ignore").decode().lower()
     intents = [
+        (("mecanismo de busca", "motor de busca", "buscador"), "Resumo executivo"),
         (("servico", "solucao", "o que faz"), "Principais serviços"),
         (("produto",), "Principais produtos"),
         (("quem e", "quem eh", "sobre a empresa"), "Quem é"),
@@ -144,13 +146,15 @@ async def answer_question_from_context(
             deduped_sources.append(source)
 
     section_name = _intent_section(question)
-    research_sources = [
-        item.get("url")
-        for item in research_context.get("sources", [])
-        if isinstance(item, dict) and item.get("url")
-    ]
+    research_sources = []
+    if is_usable_external_identity_context(research_context):
+        research_sources = [
+            item.get("url")
+            for item in research_context.get("sources", [])
+            if isinstance(item, dict) and item.get("url")
+        ]
     answer_sources = list(deduped_sources)
-    if section_name == "Quem é":
+    if section_name in {"Quem é", "Resumo executivo"}:
         answer_sources = list(dict.fromkeys([*research_sources, *answer_sources]))
 
     google_answer = await _google_summary(question, profile_text, retrieved, history)
