@@ -41,20 +41,26 @@ async def fetch_url(url: str) -> str:
         for _ in range(6):
             await ensure_public_url(current_url)
             await _respect_rate_limit()
-            response = await client.get(current_url)
-            if response.is_redirect:
-                location = response.headers.get("location")
-                if not location:
-                    response.raise_for_status()
-                current_url = urljoin(current_url, location)
-                continue
-            response.raise_for_status()
-            content_type = response.headers.get("content-type", "").lower()
-            if content_type and not any(kind in content_type for kind in ("text/html", "text/plain", "xml")):
-                raise ValueError(f"Tipo de conteúdo não suportado: {content_type}")
-            if len(response.content) > max_bytes:
-                raise ValueError("A página excede o limite de tamanho configurado")
-            return response.text
+            async with client.stream("GET", current_url) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        response.raise_for_status()
+                    current_url = urljoin(current_url, location)
+                    continue
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if content_type and not any(kind in content_type for kind in ("text/html", "text/plain", "xml")):
+                    raise ValueError("Tipo de conteúdo não suportado")
+                chunks: list[bytes] = []
+                received = 0
+                async for chunk in response.aiter_bytes():
+                    received += len(chunk)
+                    if received > max_bytes:
+                        raise ValueError("A página excede o limite de tamanho configurado")
+                    chunks.append(chunk)
+                encoding = response.encoding or "utf-8"
+                return b"".join(chunks).decode(encoding, errors="replace")
     raise ValueError("A URL excedeu o limite de redirecionamentos")
 
 

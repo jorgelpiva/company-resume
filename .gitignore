@@ -9,6 +9,7 @@ venv/
 # Environment files
 .env
 .env.*
+!.env.example
 
 # IDE
 .vscode/
@@ -17,10 +18,16 @@ venv/
 # Project data
 /data/
 *.sqlite3
+*.db
+*.log
+coverage/
+htmlcov/
+.coverage
 
 # Frontend
 node_modules/
 dist/
+.vite/
 
 # Vercel local state
 .vercel/

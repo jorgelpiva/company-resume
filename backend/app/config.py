@@ -18,6 +18,17 @@ TOP_K = 5
 MAX_BLOG_ARTICLES = 7
 EMBEDDING_DIMENSIONS = 384
 USER_AGENT = "CompanyResumeBot/1.0"
+# Origem do frontend em desenvolvimento. Em produção, frontend e API são
+# servidos pela mesma origem; para uma origem adicional, configure
+# CORS_ALLOW_ORIGINS com uma lista separada por vírgulas.
+CORS_ALLOW_ORIGINS = tuple(
+    origin.strip().rstrip("/")
+    for origin in os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+)
 ALLOWED_SCHEMES = {"http", "https"}
 DISALLOWED_HOST_PATTERNS = (
     "localhost",

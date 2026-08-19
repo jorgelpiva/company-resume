@@ -37,7 +37,7 @@ class MappingJob(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1)
+    question: str = Field(..., min_length=1, max_length=2000)
     history: List[Dict[str, str]] = Field(default_factory=list)
 
 

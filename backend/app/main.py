@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shutil
 from datetime import datetime, timezone
@@ -13,9 +14,9 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.config import DATA_DIR, MAX_PAGES, MIN_PRIMARY_CONTENT_CHARS, WORK_DIR
+from app.config import CORS_ALLOW_ORIGINS, MAX_PAGES, MIN_PRIMARY_CONTENT_CHARS, WORK_DIR
 from app.chat.service import answer_question_from_context
 from app.crawler.fetcher import fetch_html
 from app.crawler.relevance import score_url_and_content
@@ -43,9 +44,10 @@ from app.processing.summarizer import (
 from app.research.company_context import research_company_context
 
 app = FastAPI(title="Company Resume")
+logger = logging.getLogger(__name__)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ALLOW_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -56,7 +58,7 @@ if FRONTEND_ASSETS.exists():
     app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS), name="frontend-assets")
 
 class MapCompanyRequest(BaseModel):
-    url: str
+    url: str = Field(min_length=1, max_length=2048)
 
 
 def slugify_company_name(name: str) -> str:
@@ -68,20 +70,6 @@ def safe_slug(url: str) -> str:
     parsed = urlparse(url)
     host = parsed.netloc.lower().replace("www.", "")
     return re.sub(r"[^a-z0-9]+", "-", host).strip("-")
-
-
-def resolve_company_dir(slug: str) -> Path:
-    if not re.fullmatch(r"[a-zA-Z0-9-]+", slug or ""):
-        return DATA_DIR / "__invalid_company__"
-    normalized = re.sub(r"[^a-z0-9]", "", slug.lower())
-    if (DATA_DIR / normalized).exists():
-        return DATA_DIR / normalized
-    for company_dir in DATA_DIR.iterdir():
-        if not company_dir.is_dir():
-            continue
-        if re.sub(r"[^a-z0-9]", "", company_dir.name.lower()) == normalized:
-            return company_dir
-    return DATA_DIR / normalized
 
 
 def validate_url(url: str) -> str:
@@ -420,9 +408,13 @@ async def map_company(request: MapCompanyRequest) -> Dict[str, Any]:
     job_id = create_job(url=request.url)
     try:
         return await map_company_process(validated, job_id)
-    except Exception as exc:
-        update_job(job_id, status="failed", message="Falha no mapeamento", error=str(exc))
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        logger.exception("Falha ao mapear o site informado")
+        update_job(job_id, status="failed", message="Falha no mapeamento", error="Falha interna")
+        raise HTTPException(
+            status_code=422,
+            detail="Não foi possível processar o site informado.",
+        ) from None
     finally:
         for candidate in WORK_DIR.glob(f"*-{job_id}"):
             shutil.rmtree(candidate, ignore_errors=True)
